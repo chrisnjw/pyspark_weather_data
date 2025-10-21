@@ -1,0 +1,13 @@
+# Virtual Environment
+.venv/
+
+# Data - DO NOT PUSH THESE
+2024.tar.gz
+2024/
+
+# Python/Jupyter cache
+__pycache__/
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
