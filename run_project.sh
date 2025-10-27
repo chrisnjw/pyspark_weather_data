@@ -200,6 +200,7 @@ main() {
         --zone "" \
         --public-ip-address \
         --enable-component-gateway \
+        --delete-max-idle 30m \
         --master-machine-type $MASTER_MACHINE_TYPE \
         --master-boot-disk-type pd-balanced \
         --master-boot-disk-size $DISK_SIZE \
@@ -211,7 +212,7 @@ main() {
         --optional-components JUPYTER \
         --metadata "enable-oslogin=TRUE" \
         --tags "weather-ml" \
-        --scopes "https://www.googleapis.com/auth/cloud-platform"
+        --scopes "https://www.googleapis.com/auth/cloud-platform" 
     
     # Wait for cluster to be ready
     if ! wait_for_cluster $CLUSTER_NAME $REGION; then
@@ -219,20 +220,36 @@ main() {
         exit 1
     fi
     
-    # Submit job and show real-time output (upload script directly from local)
+    # Submit job asynchronously and wait for completion
     print_status "Submitting PySpark job..."
-    print_status "You'll see real-time output from the ML training process below:"
     echo "=========================================="
     
-    # Run job synchronously to show output (upload script from local)
-    if gcloud dataproc jobs submit pyspark \
+    # Run job asynchronously
+    print_status "Submitting ML training job asynchronously..."
+    JOB_OUTPUT=$(gcloud dataproc jobs submit pyspark \
         --cluster=$CLUSTER_NAME \
         --region=$REGION \
+        --async \
         train_model.py \
         -- \
         --data-path=gs://$BUCKET_NAME/data/ \
         --output-path=gs://$OUTPUT_BUCKET/results/ \
-        --train-ratio=0.7; then
+        --train-ratio=0.7 2>&1)
+    
+    # Extract job ID from output
+    JOB_ID=$(echo "$JOB_OUTPUT" | sed -n 's/.*Job \[\(.*\)\].*/\1/p')
+    
+    if [ -z "$JOB_ID" ]; then
+        print_error "Failed to get job ID from submission"
+        echo "$JOB_OUTPUT"
+        exit 1
+    fi
+    
+    print_status "Job submitted successfully with ID: $JOB_ID"
+    print_status "Waiting for job to complete..."
+    
+    # Wait for job to complete
+    if gcloud dataproc jobs wait $JOB_ID --region=$REGION; then
         print_status "ML training job completed successfully!"
     else
         print_error "ML training job failed"
