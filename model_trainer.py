@@ -11,7 +11,7 @@ from pyspark.sql.functions import (
     pow as spark_pow,
     abs as spark_abs,
 )
-from pyspark.ml.regression import LinearRegression, DecisionTreeRegressor
+from pyspark.ml.regression import RandomForestRegressor, GBTRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 
@@ -61,9 +61,10 @@ def train_models(train_df, test_df, output_path, spark):
     print("Creating feature pipeline...")
     feature_pipeline = create_feature_pipeline()
 
-    # Check data before fitting
-    print(f"Training data count: {train_df.count()}")
-    print(f"Test data count: {test_df.count()}")
+    # count() is slow, so we don't need to print it
+    # # Check data before fitting
+    # print(f"Training data count: {train_df.count()}")
+    # print(f"Test data count: {test_df.count()}")
 
     # Show sample of training data
     print("Sample of training data features:")
@@ -95,86 +96,90 @@ def train_models(train_df, test_df, output_path, spark):
     train_features.cache()
     test_features.cache()
 
-    print("Training Linear Regression...")
+    print("Training Gradient Boosting Trees (similar to LightGBM)...")
 
-    # Linear Regression
-    lr = LinearRegression(
+    # Gradient Boosting Trees - similar to LightGBM, available in PySpark
+    gbt = GBTRegressor(
         featuresCol="features",
         labelCol="temperature",
-        maxIter=100,
-        regParam=0.01,
-        elasticNetParam=0.8,
+        maxIter=50,
+        maxDepth=5,
     )
 
-    # Cross-validation for Linear Regression (simplified for testing)
-    lr_param_grid = (
+    # Cross-validation for Gradient Boosting Trees
+    gbt_param_grid = (
         ParamGridBuilder()
-        .addGrid(lr.regParam, [0.01, 0.1])  # Reduced from 3 to 2 values
-        .addGrid(lr.elasticNetParam, [0.0, 1.0])  # Reduced from 3 to 2 values
+        .addGrid(gbt.maxDepth, [3, 5])
+        .addGrid(gbt.maxIter, [30, 50])
         .build()
     )
+
+    gbt_cv = CrossValidator(
+        estimator=gbt,
+        estimatorParamMaps=gbt_param_grid,
+        evaluator=RegressionEvaluator(
+            labelCol="temperature", predictionCol="prediction", metricName="rmse"
+        ),
+        numFolds=2,
+    )
+
+    gbt_model = gbt_cv.fit(train_features)
+    gbt_predictions = gbt_model.transform(test_features)
 
     lr_evaluator = RegressionEvaluator(
         labelCol="temperature", predictionCol="prediction", metricName="rmse"
     )
 
-    lr_cv = CrossValidator(
-        estimator=lr,
-        estimatorParamMaps=lr_param_grid,
-        evaluator=lr_evaluator,
-        numFolds=2,  # Reduced from 3 to 2 folds
-    )
+    print("Training Random Forest...")
 
-    lr_model = lr_cv.fit(train_features)
-    lr_predictions = lr_model.transform(test_features)
-
-    print("Training Decision Tree...")
-
-    # Decision Tree
-    dt = DecisionTreeRegressor(
+    # Random Forest
+    rf = RandomForestRegressor(
         featuresCol="features",
         labelCol="temperature",
         maxDepth=10,
         minInstancesPerNode=5,
+        numTrees=20,
     )
 
-    # Cross-validation for Decision Tree (simplified for testing)
-    dt_param_grid = (
+    # Cross-validation for Random Forest (simplified for testing)
+    rf_param_grid = (
         ParamGridBuilder()
-        .addGrid(dt.maxDepth, [5, 10])  # Reduced from 3 to 2 values
-        .addGrid(dt.minInstancesPerNode, [5, 10])  # Reduced from 3 to 2 values
+        .addGrid(rf.maxDepth, [5, 10])  # Reduced from 3 to 2 values
+        .addGrid(rf.numTrees, [10, 20])  # Number of trees in the forest
         .build()
     )
 
-    dt_cv = CrossValidator(
-        estimator=dt,
-        estimatorParamMaps=dt_param_grid,
+    rf_cv = CrossValidator(
+        estimator=rf,
+        estimatorParamMaps=rf_param_grid,
         evaluator=lr_evaluator,
         numFolds=2,  # Reduced from 3 to 2 folds
     )
 
-    dt_model = dt_cv.fit(train_features)
-    dt_predictions = dt_model.transform(test_features)
+    rf_model = rf_cv.fit(train_features)
+    rf_predictions = rf_model.transform(test_features)
 
+    # Save to output path in a folder with the current date and time
+    output_path = f"{output_path}/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     # Save models
     print("Saving models...")
-    lr_model.bestModel.write().overwrite().save(
-        f"{output_path}/models/linear_regression"
+    gbt_model.bestModel.write().overwrite().save(
+        f"{output_path}/models/gradient_boosting"
     )
-    dt_model.bestModel.write().overwrite().save(f"{output_path}/models/decision_tree")
+    rf_model.bestModel.write().overwrite().save(f"{output_path}/models/random_forest")
     feature_model.write().overwrite().save(f"{output_path}/models/feature_pipeline")
 
     # Evaluate models
     print("Evaluating models...")
 
-    lr_metrics = evaluate_model(lr_predictions, "Linear Regression", spark)
-    dt_metrics = evaluate_model(dt_predictions, "Decision Tree", spark)
+    gbt_metrics = evaluate_model(gbt_predictions, "Gradient Boosting Trees", spark)
+    rf_metrics = evaluate_model(rf_predictions, "Random Forest", spark)
 
     # Save metrics
     metrics = {
         "timestamp": datetime.now().isoformat(),
-        "models": [lr_metrics, dt_metrics],
-        "best_model": min([lr_metrics, dt_metrics], key=lambda x: x["rmse"])["model"],
+        "models": [gbt_metrics, rf_metrics],
+        "best_model": min([gbt_metrics, rf_metrics], key=lambda x: x["rmse"])["model"],
     }
 
     # Save metrics to GCS

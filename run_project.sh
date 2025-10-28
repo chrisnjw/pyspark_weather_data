@@ -14,9 +14,14 @@ OUTPUT_BUCKET=${OUTPUT_BUCKET:-$BUCKET_NAME}
 
 # Cluster configuration
 MASTER_MACHINE_TYPE=${MASTER_MACHINE_TYPE:-"n1-standard-2"}
-WORKER_MACHINE_TYPE=${WORKER_MACHINE_TYPE:-"n1-standard-4"}
+WORKER_MACHINE_TYPE=${WORKER_MACHINE_TYPE:-"n1-standard-8"}
 NUM_WORKERS=${NUM_WORKERS:-2}
-DISK_SIZE=${DISK_SIZE:-100}
+NUM_SECONDARY_WORKERS=${NUM_SECONDARY_WORKERS:-1}
+DISK_SIZE=${DISK_SIZE:-30}
+
+PROPERTIES=spark:spark.executor.instances=4
+PROPERTIES=$PROPERTIES,spark:spark.executor.cores=3
+PROPERTIES=$PROPERTIES,spark:spark.executor.memory=11700m
 
 # Colors for output
 RED='\033[0;31m'
@@ -156,30 +161,32 @@ main() {
     # Check if data exists in bucket
     print_status "Checking if data exists in bucket..."
     if ! gsutil ls gs://$BUCKET_NAME/data/ >/dev/null 2>&1; then
-        print_warning "Data not found in gs://$BUCKET_NAME/data/"
-        print_status "Attempting to upload data automatically..."
+    #     print_warning "Data not found in gs://$BUCKET_NAME/data/"
+    #     print_status "Attempting to upload data automatically..."
         
-        # Try to run upload script (use simple version to avoid disk space issues)
-        if [ -f "./upload_data_simple.sh" ]; then
-            print_status "Running upload_data_simple.sh (avoids local disk space issues)..."
-            if ./upload_data_simple.sh; then
-                print_status "Data upload completed successfully"
-            else
-                print_error "Data upload failed. Please run ./upload_data_simple.sh manually first."
-                exit 1
-            fi
-        elif [ -f "./upload_data.sh" ]; then
-            print_status "Running upload_data.sh..."
-            if ./upload_data.sh; then
-                print_status "Data upload completed successfully"
-            else
-                print_error "Data upload failed. Please run ./upload_data.sh manually first."
-                exit 1
-            fi
-        else
-            print_error "No upload script found. Please upload data manually."
-            exit 1
-        fi
+    #     # Try to run upload script (use simple version to avoid disk space issues)
+    #     if [ -f "./upload_data_simple.sh" ]; then
+    #         print_status "Running upload_data_simple.sh (avoids local disk space issues)..."
+    #         if ./upload_data_simple.sh; then
+    #             print_status "Data upload completed successfully"
+    #         else
+    #             print_error "Data upload failed. Please run ./upload_data_simple.sh manually first."
+    #             exit 1
+    #         fi
+    #     elif [ -f "./upload_data.sh" ]; then
+    #         print_status "Running upload_data.sh..."
+    #         if ./upload_data.sh; then
+    #             print_status "Data upload completed successfully"
+    #         else
+    #             print_error "Data upload failed. Please run ./upload_data.sh manually first."
+    #             exit 1
+    #         fi
+    #     else
+    #         print_error "No upload script found. Please upload data manually."
+    #         exit 1
+    #     fi
+        print_status "Data not found in bucket"
+        exit 1
     else
         print_status "Data found in bucket"
     fi
@@ -189,7 +196,7 @@ main() {
     gcloud config set project $PROJECT_ID
     
     # Check and fix service account permissions
-    check_and_fix_permissions
+    # check_and_fix_permissions
     
     # Create Dataproc cluster
     print_status "Creating Dataproc cluster: $CLUSTER_NAME"
@@ -208,10 +215,14 @@ main() {
         --worker-machine-type $WORKER_MACHINE_TYPE \
         --worker-boot-disk-type pd-balanced \
         --worker-boot-disk-size $DISK_SIZE \
+        --num-secondary-workers $NUM_SECONDARY_WORKERS \
+        --secondary-worker-boot-disk-size $DISK_SIZE \
+        --secondary-worker-type preemptible\
         --no-shielded-secure-boot \
         --optional-components JUPYTER \
         --metadata "enable-oslogin=TRUE" \
         --tags "weather-ml" \
+        --properties $PROPERTIES \
         --scopes "https://www.googleapis.com/auth/cloud-platform" 
     
     # Wait for cluster to be ready
@@ -230,6 +241,7 @@ main() {
         --cluster=$CLUSTER_NAME \
         --region=$REGION \
         --async \
+        --py-files=data_loader.py,feature_pipeline.py,model_trainer.py \
         train_model.py \
         -- \
         --data-path=gs://$BUCKET_NAME/data/ \
@@ -246,7 +258,7 @@ main() {
     fi
     
     print_status "Job submitted successfully with ID: $JOB_ID"
-    print_status "Waiting for job to complete..."
+    # print_status "Waiting for job to complete..."
     
     # Wait for job to complete
     if gcloud dataproc jobs wait $JOB_ID --region=$REGION; then
@@ -258,42 +270,42 @@ main() {
         exit 1
     fi
     
-    echo "=========================================="
+    # echo "=========================================="
     
-    # Download results
-    print_status "Downloading results..."
-    mkdir -p results
-    gsutil -m cp -r gs://$OUTPUT_BUCKET/results/* results/ 2>/dev/null || print_warning "No results found to download"
+    # # Download results
+    # print_status "Downloading results..."
+    # mkdir -p results
+    # gsutil -m cp -r gs://$OUTPUT_BUCKET/results/* results/ 2>/dev/null || print_warning "No results found to download"
     
-    # Display results summary
-    print_status "=== Results Summary ==="
-    if [ -f "results/metrics/part-00000" ]; then
-        echo ""
-        cat results/metrics/part-00000
-        echo ""
-    else
-        print_warning "Metrics file not found. Check job logs for details."
-    fi
+    # # Display results summary
+    # print_status "=== Results Summary ==="
+    # if [ -f "results/metrics/part-00000" ]; then
+    #     echo ""
+    #     cat results/metrics/part-00000
+    #     echo ""
+    # else
+    #     print_warning "Metrics file not found. Check job logs for details."
+    # fi
     
-    # Clean up cluster
-    print_status "Cleaning up cluster..."
-    gcloud dataproc clusters delete $CLUSTER_NAME --region=$REGION --quiet
+    # # Clean up cluster
+    # print_status "Cleaning up cluster..."
+    # gcloud dataproc clusters delete $CLUSTER_NAME --region=$REGION --quiet
     
-    print_status "=== Project Execution Complete ==="
-    print_status "Results saved to: results/"
-    print_status "Models saved to: gs://$OUTPUT_BUCKET/results/models/"
-    print_status "Metrics saved to: gs://$OUTPUT_BUCKET/results/metrics/"
+    # print_status "=== Project Execution Complete ==="
+    # print_status "Results saved to: results/"
+    # print_status "Models saved to: gs://$OUTPUT_BUCKET/results/models/"
+    # print_status "Metrics saved to: gs://$OUTPUT_BUCKET/results/metrics/"
 }
 
-# Trap to ensure cleanup on script exit
-cleanup() {
-    if [ ! -z "$CLUSTER_NAME" ]; then
-        print_warning "Cleaning up cluster due to script interruption..."
-        gcloud dataproc clusters delete $CLUSTER_NAME --region=$REGION --quiet 2>/dev/null || true
-    fi
-}
+# # Trap to ensure cleanup on script exit
+# cleanup() {
+#     if [ ! -z "$CLUSTER_NAME" ]; then
+#         print_warning "Cleaning up cluster due to script interruption..."
+#         gcloud dataproc clusters delete $CLUSTER_NAME --region=$REGION --quiet 2>/dev/null || true
+#     fi
+# }
 
-trap cleanup EXIT INT TERM
+# trap cleanup EXIT INT TERM
 
 # Run main function
 main "$@"
