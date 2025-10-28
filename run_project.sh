@@ -6,7 +6,8 @@
 set -e
 
 # Configuration - Set these environment variables or modify defaults
-PROJECT_ID="dsa-project-weather"
+# PROJECT_ID="dsa-project-weather"
+PROJECT_ID="dsa5208-new-project-weather"
 REGION=${REGION:-"asia-east1"}
 CLUSTER_NAME=${CLUSTER_NAME:-"weather-ml-cluster-$(date +%s)"}
 BUCKET_NAME=${BUCKET_NAME:-"weather-ml-data-1760683141"}
@@ -22,6 +23,8 @@ DISK_SIZE=${DISK_SIZE:-30}
 PROPERTIES=spark:spark.executor.instances=4
 PROPERTIES=$PROPERTIES,spark:spark.executor.cores=3
 PROPERTIES=$PROPERTIES,spark:spark.executor.memory=11700m
+PROPERTIES=$PROPERTIES,spark:spark.driver.memory=8g
+
 
 # Colors for output
 RED='\033[0;31m'
@@ -207,7 +210,7 @@ main() {
         --zone "" \
         --public-ip-address \
         --enable-component-gateway \
-        --delete-max-idle 30m \
+        --delete-max-idle 5m \
         --master-machine-type $MASTER_MACHINE_TYPE \
         --master-boot-disk-type pd-balanced \
         --master-boot-disk-size $DISK_SIZE \
@@ -269,43 +272,7 @@ main() {
         gcloud dataproc clusters delete $CLUSTER_NAME --region=$REGION --quiet || true
         exit 1
     fi
-    
-    # echo "=========================================="
-    
-    # # Download results
-    # print_status "Downloading results..."
-    # mkdir -p results
-    # gsutil -m cp -r gs://$OUTPUT_BUCKET/results/* results/ 2>/dev/null || print_warning "No results found to download"
-    
-    # # Display results summary
-    # print_status "=== Results Summary ==="
-    # if [ -f "results/metrics/part-00000" ]; then
-    #     echo ""
-    #     cat results/metrics/part-00000
-    #     echo ""
-    # else
-    #     print_warning "Metrics file not found. Check job logs for details."
-    # fi
-    
-    # # Clean up cluster
-    # print_status "Cleaning up cluster..."
-    # gcloud dataproc clusters delete $CLUSTER_NAME --region=$REGION --quiet
-    
-    # print_status "=== Project Execution Complete ==="
-    # print_status "Results saved to: results/"
-    # print_status "Models saved to: gs://$OUTPUT_BUCKET/results/models/"
-    # print_status "Metrics saved to: gs://$OUTPUT_BUCKET/results/metrics/"
 }
-
-# # Trap to ensure cleanup on script exit
-# cleanup() {
-#     if [ ! -z "$CLUSTER_NAME" ]; then
-#         print_warning "Cleaning up cluster due to script interruption..."
-#         gcloud dataproc clusters delete $CLUSTER_NAME --region=$REGION --quiet 2>/dev/null || true
-#     fi
-# }
-
-# trap cleanup EXIT INT TERM
 
 # Run main function
 main "$@"

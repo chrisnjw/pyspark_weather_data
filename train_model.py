@@ -18,6 +18,7 @@ def create_spark_session():
         SparkSession.builder.appName("WeatherML")
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        .config("spark.ui.showConsoleProgress", "true")
         .getOrCreate()
     )
 
@@ -44,8 +45,8 @@ def main():
             [args.train_ratio, 1 - args.train_ratio], seed=42
         )
 
-        print(f"Training set: {train_df.count()} records")
-        print(f"Test set: {test_df.count()} records")
+        # print(f"Training set: {train_df.count()} records")
+        # print(f"Test set: {test_df.count()} records")
 
         # Train models
         metrics = train_models(train_df, test_df, args.output_path, spark)

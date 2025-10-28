@@ -16,6 +16,61 @@ from pyspark.sql.functions import (
 from pyspark.sql.types import *
 
 
+def clean_weather_column(
+    input_df,
+    col_name,
+    missing_code,
+    quality_flags,
+    scale_factor,
+    handle_signs=False,
+):
+    """Top-level helper to clean NOAA value,flag columns.
+    Defined at module scope to avoid capturing in Spark task closures.
+    """
+    df_with_c = input_df.where(col(col_name).contains(","))
+    df_p = (
+        df_with_c.withColumn(f"{col_name}_parts", split(col(col_name), ","))
+        .withColumn(f"{col_name}_value", col(f"{col_name}_parts")[0])
+        .withColumn(f"{col_name}_flag", col(f"{col_name}_parts")[1])
+    )
+    df_good = df_p.where(
+        (col(f"{col_name}_value") != missing_code)
+        & (col(f"{col_name}_flag").isin(quality_flags))
+    )
+
+    if handle_signs:
+        df_good = df_good.withColumn(
+            f"{col_name}_signed_value",
+            when(
+                col(f"{col_name}_value").startswith("+"),
+                substring(col(f"{col_name}_value"), 2, 100),
+            )
+            .when(col(f"{col_name}_value").startswith("-"), col(f"{col_name}_value"))
+            .otherwise(col(f"{col_name}_value")),
+        )
+        clean_col_name = col_name.lower() + "_clean"
+        df_final = df_good.withColumn(
+            clean_col_name,
+            col(f"{col_name}_signed_value").cast(DoubleType()) / scale_factor,
+        )
+        df_final = df_final.drop(
+            col_name,
+            f"{col_name}_parts",
+            f"{col_name}_value",
+            f"{col_name}_flag",
+            f"{col_name}_signed_value",
+        )
+    else:
+        clean_col_name = col_name.lower() + "_clean"
+        df_final = df_good.withColumn(
+            clean_col_name, col(f"{col_name}_value").cast(DoubleType()) / scale_factor
+        )
+        df_final = df_final.drop(
+            col_name, f"{col_name}_parts", f"{col_name}_value", f"{col_name}_flag"
+        )
+    return df_final
+
+
 def load_and_preprocess_data(spark, data_path):
     """Load weather data and perform preprocessing using notebook pipeline"""
     print("Loading weather data from:", data_path)
@@ -69,7 +124,8 @@ def load_and_preprocess_data(spark, data_path):
     print("Loading data from directory...")
     df = spark.read.option("header", "true").schema(schema).csv(data_path)
 
-    print(f"Loaded {df.count()} records")
+    # Records count is slow, so we don't need to print it
+    # print(f"Loaded {df.count()} records")
 
     # ================= Preprocessing =================
     # 1) Clean TMP -> temperature
@@ -131,61 +187,7 @@ def load_and_preprocess_data(spark, data_path):
         "lat_rad", "lon_rad", "latitude", "longitude", "hour_raw", "day_of_year_raw"
     )
 
-    # Helper to clean NOAA value,flag columns (like in notebook)
-    def clean_weather_column(
-        input_df,
-        col_name,
-        missing_code,
-        quality_flags,
-        scale_factor,
-        handle_signs=False,
-    ):
-        df_with_c = input_df.where(col(col_name).contains(","))
-        df_p = (
-            df_with_c.withColumn(f"{col_name}_parts", split(col(col_name), ","))
-            .withColumn(f"{col_name}_value", col(f"{col_name}_parts")[0])
-            .withColumn(f"{col_name}_flag", col(f"{col_name}_parts")[1])
-        )
-        df_good = df_p.where(
-            (col(f"{col_name}_value") != missing_code)
-            & (col(f"{col_name}_flag").isin(quality_flags))
-        )
-
-        # Handle signs for dew point
-        if handle_signs:
-            df_good = df_good.withColumn(
-                f"{col_name}_signed_value",
-                when(
-                    col(f"{col_name}_value").startswith("+"),
-                    substring(col(f"{col_name}_value"), 2, 100),
-                )
-                .when(
-                    col(f"{col_name}_value").startswith("-"), col(f"{col_name}_value")
-                )
-                .otherwise(col(f"{col_name}_value")),
-            )
-            clean_col_name = col_name.lower() + "_clean"
-            df_final = df_good.withColumn(
-                clean_col_name,
-                col(f"{col_name}_signed_value").cast(DoubleType()) / scale_factor,
-            )
-            df_final = df_final.drop(
-                col_name,
-                f"{col_name}_parts",
-                f"{col_name}_value",
-                f"{col_name}_flag",
-                f"{col_name}_signed_value",
-            )
-        else:
-            clean_col_name = col_name.lower() + "_clean"
-            df_final = df_good.withColumn(
-                clean_col_name,
-                col(f"{col_name}_value").cast(DoubleType()) / scale_factor,
-            )
-            df_final = df_final.drop(
-                col_name, f"{col_name}_parts", f"{col_name}_value", f"{col_name}_flag"
-            )
-        return df_final
+    # Helper is now at module scope (see top of file)
 
     # 4) Clean DEW with sign handling
     df_feat = clean_weather_column(
@@ -242,7 +244,7 @@ def load_and_preprocess_data(spark, data_path):
     # elevation sentinel
     df_feat = df_feat.where(col("elevation") != -999.9)
 
-    print(f"After preprocessing: {df_feat.count()} records")
+    # print(f"After preprocessing: {df_feat.count()} records")
 
     # Show sample
     print("Sample of processed features:")
@@ -262,5 +264,8 @@ def load_and_preprocess_data(spark, data_path):
         "day_of_year_sin",
         "day_of_year_cos",
     ).show(5)
+
+    # print("\nFeature Statistics:")
+    # df_feat.describe().show()
 
     return df_feat
