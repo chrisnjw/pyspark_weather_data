@@ -14,16 +14,21 @@ BUCKET_NAME=${BUCKET_NAME:-"weather-ml-data-1760683141"}
 OUTPUT_BUCKET=${OUTPUT_BUCKET:-$BUCKET_NAME}
 
 # Cluster configuration
-MASTER_MACHINE_TYPE=${MASTER_MACHINE_TYPE:-"n1-standard-2"}
-WORKER_MACHINE_TYPE=${WORKER_MACHINE_TYPE:-"n1-standard-8"}
-NUM_WORKERS=${NUM_WORKERS:-2}
-NUM_SECONDARY_WORKERS=${NUM_SECONDARY_WORKERS:-1}
-DISK_SIZE=${DISK_SIZE:-30}
+MASTER_MACHINE_TYPE=${MASTER_MACHINE_TYPE:-"n1-highmem-2"}
+WORKER_MACHINE_TYPE=${WORKER_MACHINE_TYPE:-"n1-highmem-8"}
+NUM_WORKERS=${NUM_WORKERS:-3}
+NUM_SECONDARY_WORKERS=${NUM_SECONDARY_WORKERS:-2}
+DISK_SIZE=${DISK_SIZE:-"200g"}
 
-PROPERTIES=spark:spark.executor.instances=4
+PROPERTIES=spark:spark.executor.instances=10
 PROPERTIES=$PROPERTIES,spark:spark.executor.cores=3
-PROPERTIES=$PROPERTIES,spark:spark.executor.memory=11700m
-PROPERTIES=$PROPERTIES,spark:spark.driver.memory=8g
+PROPERTIES=$PROPERTIES,spark:spark.executor.memory=14g
+PROPERTIES=$PROPERTIES,spark:spark.driver.memory=10g
+PROPERTIES=$PROPERTIES,spark.serializer=org.apache.spark.serializer.KryoSerializer
+PROPERTIES=$PROPERTIES,spark.sql.shuffle.partitions=400
+PROPERTIES=$PROPERTIES,spark.default.parallelism=400
+PROPERTIES=$PROPERTIES,spark.memory.fraction=0.8
+PROPERTIES=$PROPERTIES,spark.memory.storageFraction=0.3
 
 
 # Colors for output
@@ -212,11 +217,11 @@ main() {
         --enable-component-gateway \
         --delete-max-idle 5m \
         --master-machine-type $MASTER_MACHINE_TYPE \
-        --master-boot-disk-type pd-balanced \
+        --master-boot-disk-type local-ssd \
         --master-boot-disk-size $DISK_SIZE \
         --num-workers $NUM_WORKERS \
         --worker-machine-type $WORKER_MACHINE_TYPE \
-        --worker-boot-disk-type pd-balanced \
+        --worker-boot-disk-type local-ssd \
         --worker-boot-disk-size $DISK_SIZE \
         --num-secondary-workers $NUM_SECONDARY_WORKERS \
         --secondary-worker-boot-disk-size $DISK_SIZE \

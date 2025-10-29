@@ -96,6 +96,10 @@ def train_models(train_df, test_df, output_path, spark):
     train_features.cache()
     test_features.cache()
 
+    sample_train_features = train_features.sample(
+        withReplacement=False, fraction=0.1, seed=42
+    ).cache()
+
     print("Training Gradient Boosting Trees")
 
     # Gradient Boosting Trees
@@ -110,10 +114,11 @@ def train_models(train_df, test_df, output_path, spark):
     # Cross-validation grid
     gbt_param_grid = (
         ParamGridBuilder()
-        .addGrid(gbt.maxDepth, [6, 8])  # Moderate depth for 8 features
-        .addGrid(gbt.maxIter, [30, 50])  # More iterations for stability
-        .addGrid(gbt.stepSize, [0.05, 0.1, 0.2])
-        # .addGrid(gbt.subsamplingRate, [0.8, 0.9])  # Prevent overfitting
+        .addGrid(gbt.maxIter, [20, 50])
+        .addGrid(gbt.maxDepth, [3, 5, 8])
+        .addGrid(gbt.maxBins, [32, 64])
+        .addGrid(gbt.stepSize, [0.05, 0.1])
+        .addGrid(gbt.subsamplingRate, [0.8])
         .build()
     )
 
@@ -124,11 +129,11 @@ def train_models(train_df, test_df, output_path, spark):
             labelCol="temperature", predictionCol="prediction", metricName="rmse"
         ),
         trainRatio=0.8,  # 80% of data for training, 20% for validation
+        parallelism=8,
     )
 
-    # CV on sample for hyperparameter tuning
-    print("Running CV on sample (this may take a few minutes)...")
-    gbt_model_cv = gbt_tvs.fit(train_features)
+    # CV for hyperparameter tuning
+    gbt_model_cv = gbt_tvs.fit(sample_train_features)
 
     # Extract best hyperparameters
     # best_idx = min(enumerate(gbt_model_cv.avgMetrics), key=lambda x: x[1])[0]
@@ -171,9 +176,11 @@ def train_models(train_df, test_df, output_path, spark):
     # Cross-validation grid
     rf_param_grid = (
         ParamGridBuilder()
-        .addGrid(rf.maxDepth, [10, 20])  # Deeper trees for complex patterns
-        .addGrid(rf.numTrees, [50, 100])  # More trees for stability
-        .addGrid(rf.minInstancesPerNode, [10, 20])  # Pruning options
+        .addGrid(rf.numTrees, [50, 100])
+        .addGrid(rf.maxDepth, [6, 10, 14])
+        .addGrid(rf.maxBins, [32, 64])
+        .addGrid(rf.subsamplingRate, [0.8, 1.0])
+        .addGrid(rf.featureSubsetStrategy, ["auto", "sqrt"])
         .build()
     )
 
@@ -182,11 +189,12 @@ def train_models(train_df, test_df, output_path, spark):
         estimatorParamMaps=rf_param_grid,
         evaluator=lr_evaluator,
         trainRatio=0.8,  # 80% of data for training, 20% for validation
+        parallelism=8,
     )
 
     # CV on sample for hyperparameter tuning
     print("Running CV (this may take a few minutes)...")
-    rf_model_cv = rf_tvs.fit(train_features)
+    rf_model_cv = rf_tvs.fit(sample_train_features)
 
     # Extract best hyperparameters
     param_map = rf_model_cv.bestModel.extractParamMap()
