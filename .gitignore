@@ -4,6 +4,7 @@
 # Data - DO NOT PUSH THESE
 2024.tar.gz
 2024/
+results
 
 # Python/Jupyter cache
 __pycache__/
