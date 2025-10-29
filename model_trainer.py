@@ -13,7 +13,7 @@ from pyspark.sql.functions import (
 )
 from pyspark.ml.regression import RandomForestRegressor, GBTRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
-from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+from pyspark.ml.tuning import CrossValidator, ParamGridBuilder, TrainValidationSplit
 
 
 def evaluate_model(predictions, model_name, spark):
@@ -96,54 +96,49 @@ def train_models(train_df, test_df, output_path, spark):
     train_features.cache()
     test_features.cache()
 
-    print("Creating sample for hyperparameter tuning...")
-    # Sample 2% of training data for CV (much faster)
-    sampling_fraction = 0.02
-    cv_sample = train_features.sample(
-        withReplacement=False, fraction=sampling_fraction, seed=42
-    )
-    cv_sample.cache()
-
-    sample_count = cv_sample.count()
-    print(
-        f"Using {sampling_fraction*100}% of training data ({sample_count} rows) for hyperparameter tuning"
-    )
-
     print("Training Gradient Boosting Trees")
 
     # Gradient Boosting Trees
     gbt = GBTRegressor(
         featuresCol="features",
         labelCol="temperature",
-        maxIter=50,
+        maxIter=100,
         maxDepth=5,
+        subsamplingRate=0.8,
     )
 
     # Cross-validation grid
     gbt_param_grid = (
         ParamGridBuilder()
-        .addGrid(gbt.maxDepth, [6, 8, 10])  # Moderate depth for 8 features
-        .addGrid(gbt.maxIter, [80, 120, 150])  # More iterations for stability
-        .addGrid(gbt.subsamplingRate, [0.8, 0.9])  # Prevent overfitting
+        .addGrid(gbt.maxDepth, [6, 8])  # Moderate depth for 8 features
+        .addGrid(gbt.maxIter, [30, 50])  # More iterations for stability
+        .addGrid(gbt.stepSize, [0.05, 0.1, 0.2])
+        # .addGrid(gbt.subsamplingRate, [0.8, 0.9])  # Prevent overfitting
         .build()
     )
 
-    gbt_cv = CrossValidator(
+    gbt_tvs = TrainValidationSplit(
         estimator=gbt,
         estimatorParamMaps=gbt_param_grid,
         evaluator=RegressionEvaluator(
             labelCol="temperature", predictionCol="prediction", metricName="rmse"
         ),
-        numFolds=3,
+        trainRatio=0.8,  # 80% of data for training, 20% for validation
     )
 
     # CV on sample for hyperparameter tuning
     print("Running CV on sample (this may take a few minutes)...")
-    gbt_model_cv = gbt_cv.fit(cv_sample)
+    gbt_model_cv = gbt_tvs.fit(train_features)
 
     # Extract best hyperparameters
-    best_idx = min(enumerate(gbt_model_cv.avgMetrics), key=lambda x: x[1])[0]
-    best_params = gbt_model_cv.getEstimatorParamMaps()[best_idx]
+    # best_idx = min(enumerate(gbt_model_cv.avgMetrics), key=lambda x: x[1])[0]
+    param_map = gbt_model_cv.bestModel.extractParamMap()
+
+    # Define subset of hyperparameters you care about
+    subset_params = ["maxIter", "maxDepth", "stepSize", "minInstancesPerNode"]
+
+    # Convert to plain Python dict
+    best_params = {p.name: param_map[p] for p in param_map if p.name in subset_params}
 
     print(f"Best GBT hyperparameters: {best_params}")
 
@@ -154,8 +149,7 @@ def train_models(train_df, test_df, output_path, spark):
         labelCol="temperature",
     )
     # Apply best hyperparameters
-    for param, param_value in best_params.items():
-        final_gbt = final_gbt.set(param, param_value)
+    final_gbt = final_gbt.setParams(**best_params)
 
     gbt_model = final_gbt.fit(train_features)  # Train on ALL data
     gbt_predictions = gbt_model.transform(test_features)
@@ -170,31 +164,38 @@ def train_models(train_df, test_df, output_path, spark):
     rf = RandomForestRegressor(
         featuresCol="features",
         labelCol="temperature",
+        numTrees=10,
+        minInstancesPerNode=10,
     )
 
     # Cross-validation grid
     rf_param_grid = (
         ParamGridBuilder()
-        .addGrid(rf.maxDepth, [12, 20])  # Deeper trees for complex patterns
-        .addGrid(rf.numTrees, [100, 200])  # More trees for stability
+        .addGrid(rf.maxDepth, [10, 20])  # Deeper trees for complex patterns
+        .addGrid(rf.numTrees, [50, 100])  # More trees for stability
         .addGrid(rf.minInstancesPerNode, [10, 20])  # Pruning options
         .build()
     )
 
-    rf_cv = CrossValidator(
+    rf_tvs = TrainValidationSplit(
         estimator=rf,
         estimatorParamMaps=rf_param_grid,
         evaluator=lr_evaluator,
-        numFolds=3,
+        trainRatio=0.8,  # 80% of data for training, 20% for validation
     )
 
     # CV on sample for hyperparameter tuning
-    print("Running CV on sample (this may take a few minutes)...")
-    rf_model_cv = rf_cv.fit(cv_sample)
+    print("Running CV (this may take a few minutes)...")
+    rf_model_cv = rf_tvs.fit(train_features)
 
     # Extract best hyperparameters
-    best_idx = min(enumerate(rf_model_cv.avgMetrics), key=lambda x: x[1])[0]
-    best_params = rf_model_cv.getEstimatorParamMaps()[best_idx]
+    param_map = rf_model_cv.bestModel.extractParamMap()
+
+    # Define subset of hyperparameters you care about
+    subset_params = ["numTrees", "maxDepth", "minInstancesPerNode"]
+
+    # Convert to plain Python dict
+    best_params = {p.name: param_map[p] for p in param_map if p.name in subset_params}
 
     print(f"Best RF hyperparameters: {best_params}")
 
@@ -205,14 +206,13 @@ def train_models(train_df, test_df, output_path, spark):
         labelCol="temperature",
     )
     # Apply best hyperparameters
-    for param, param_value in best_params.items():
-        final_rf = final_rf.set(param, param_value)
+    final_rf = final_rf.setParams(**best_params)
 
     rf_model = final_rf.fit(train_features)  # Train on ALL data
     rf_predictions = rf_model.transform(test_features)
 
     # Save to output path in a folder with the current date and time
-    # output_path = f"{output_path}/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    output_path = f"{output_path}/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     # Save models
     print("Saving models...")
     gbt_model.write().overwrite().save(f"{output_path}/models/gradient_boosting")
