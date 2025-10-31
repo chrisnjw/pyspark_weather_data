@@ -14,4 +14,8 @@ __pycache__/
 .DS_Store
 
 # Exclude specific notebook
-data_preprocessing.ipynb # <-- ADD THIS LINE
+data_preprocessing.ipynb 
+
+# Saved model artifacts  
+gbt_model_v1/
+rf_model_v1/
