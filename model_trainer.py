@@ -53,6 +53,110 @@ def evaluate_model(predictions, model_name, spark):
     }
 
 
+def three_phase_tuning(
+    estimator, param_grid, train_features, train_ratio=0.8, top_n=3, parallelism=8
+):
+    """
+    Three-phase hyperparameter tuning:
+    1. Phase 1: 2% data - broad grid search, find top N candidates
+    2. Phase 2: 10% data - narrow search on top candidates, find best
+    3. Phase 3: 100% data - train final model with best hyperparameters
+
+    Returns: Trained model on full dataset
+    """
+    evaluator = RegressionEvaluator(
+        labelCol="temperature", predictionCol="prediction", metricName="rmse"
+    )
+
+    # Phase 1: 1% data - broad search
+    print(f"  Phase 1: Grid search on 1% of data...")
+    phase1_sample = train_features.sample(withReplacement=False, fraction=0.01, seed=42)
+    phase1_sample.cache()
+
+    phase1_tvs = TrainValidationSplit(
+        estimator=estimator,
+        estimatorParamMaps=param_grid,
+        evaluator=evaluator,
+        trainRatio=train_ratio,
+        parallelism=parallelism,
+    )
+
+    phase1_model = phase1_tvs.fit(phase1_sample)
+
+    # Get top N candidates (lowest RMSE)
+    param_map_list = phase1_model.getEstimatorParamMaps()
+    metrics_list = (
+        phase1_model.validationMetrics
+    )  # TrainValidationSplit uses validationMetrics
+    candidates = list(zip(param_map_list, metrics_list))
+    candidates.sort(key=lambda x: x[1])  # Sort by RMSE (lower is better)
+    top_candidates = candidates[:top_n]
+
+    print(f"  Phase 1 complete. Top {top_n} candidates:")
+    for i, (params, metric) in enumerate(top_candidates, 1):
+        # Extract hyperparameters from ParamMap for display
+        params_dict = {param.name: value for param, value in params.items()}
+        params_str = ", ".join([f"{k}={v}" for k, v in sorted(params_dict.items())])
+        print(f"    {i}. RMSE: {metric:.4f} | {params_str}")
+
+    # Phase 2: 10% data - narrow search
+    print(f"  Phase 2: Narrow search on 10% of data with top {top_n} candidates...")
+    phase2_sample = train_features.sample(withReplacement=False, fraction=0.1, seed=42)
+    phase2_sample.cache()
+
+    # Create new grid with only top candidates
+    phase2_param_grid = [params for params, _ in top_candidates]
+
+    phase2_tvs = TrainValidationSplit(
+        estimator=estimator,
+        estimatorParamMaps=phase2_param_grid,
+        evaluator=evaluator,
+        trainRatio=train_ratio,
+        parallelism=parallelism,
+    )
+
+    phase2_model = phase2_tvs.fit(phase2_sample)
+    best_idx = min(enumerate(phase2_model.validationMetrics), key=lambda x: x[1])[0]
+    best_params = phase2_model.getEstimatorParamMaps()[best_idx]
+    best_metric = phase2_model.validationMetrics[best_idx]
+
+    print(f"  Phase 2 complete. Best RMSE: {best_metric:.4f}")
+
+    # Extract best hyperparameters for display
+    param_map = phase2_model.bestModel.extractParamMap()
+    subset_params = [
+        "maxIter",
+        "maxDepth",
+        "stepSize",
+        "minInstancesPerNode",
+        "numTrees",
+        "subsamplingRate",
+        "maxBins",
+        "featureSubsetStrategy",
+    ]
+    best_params_dict = {
+        p.name: param_map[p] for p in param_map if p.name in subset_params
+    }
+    print(f"  Best hyperparameters: {best_params_dict}")
+
+    # Phase 3: 100% data - final training
+    print(f"  Phase 3: Training final model on full dataset...")
+    final_estimator = estimator.__class__(
+        featuresCol=estimator.getFeaturesCol(),
+        labelCol=estimator.getLabelCol(),
+    )
+
+    # Apply best hyperparameters from ParamMap
+    # Convert ParamMap (Param objects as keys) to dict with string keys
+    param_dict = {param.name: value for param, value in best_params.items()}
+    final_estimator = final_estimator.setParams(**param_dict)
+
+    final_model = final_estimator.fit(train_features)
+    print(f"  Phase 3 complete. Final model trained on full dataset.")
+
+    return final_model
+
+
 def train_models(train_df, test_df, output_path, spark):
     """Train and evaluate ML models"""
 
@@ -96,11 +200,7 @@ def train_models(train_df, test_df, output_path, spark):
     train_features.cache()
     test_features.cache()
 
-    sample_train_features = train_features.sample(
-        withReplacement=False, fraction=0.1, seed=42
-    ).cache()
-
-    print("Training Gradient Boosting Trees")
+    print("Training Gradient Boosting Trees with 3-phase hyperparameter tuning")
 
     # Gradient Boosting Trees
     gbt = GBTRegressor(
@@ -111,69 +211,42 @@ def train_models(train_df, test_df, output_path, spark):
         subsamplingRate=0.8,
     )
 
-    # Cross-validation grid
     gbt_param_grid = (
         ParamGridBuilder()
-        .addGrid(gbt.maxIter, [20, 50])
         .addGrid(gbt.maxDepth, [3, 5, 8])
-        .addGrid(gbt.maxBins, [32, 64])
+        .addGrid(gbt.maxIter, [20, 50])
         .addGrid(gbt.stepSize, [0.05, 0.1])
-        .addGrid(gbt.subsamplingRate, [0.8])
+        .addGrid(gbt.maxBins, [32, 64])
         .build()
     )
 
-    gbt_tvs = TrainValidationSplit(
+    # Use 3-phase tuning
+    print("Starting 3-phase hyperparameter tuning for GBT...")
+    gbt_model = three_phase_tuning(
         estimator=gbt,
-        estimatorParamMaps=gbt_param_grid,
-        evaluator=RegressionEvaluator(
-            labelCol="temperature", predictionCol="prediction", metricName="rmse"
-        ),
-        trainRatio=0.8,  # 80% of data for training, 20% for validation
+        param_grid=gbt_param_grid,
+        train_features=train_features,
+        train_ratio=0.8,
+        top_n=5,  # Keep top 5 candidates from Phase 1
         parallelism=8,
     )
 
-    # CV for hyperparameter tuning
-    gbt_model_cv = gbt_tvs.fit(sample_train_features)
-
-    # Extract best hyperparameters
-    # best_idx = min(enumerate(gbt_model_cv.avgMetrics), key=lambda x: x[1])[0]
-    param_map = gbt_model_cv.bestModel.extractParamMap()
-
-    # Define subset of hyperparameters you care about
-    subset_params = ["maxIter", "maxDepth", "stepSize", "minInstancesPerNode"]
-
-    # Convert to plain Python dict
-    best_params = {p.name: param_map[p] for p in param_map if p.name in subset_params}
-
-    print(f"Best GBT hyperparameters: {best_params}")
-
-    # Refit on full training data with best hyperparameters
-    print("Refitting GBT on full training data with best hyperparameters...")
-    final_gbt = GBTRegressor(
-        featuresCol="features",
-        labelCol="temperature",
-    )
-    # Apply best hyperparameters
-    final_gbt = final_gbt.setParams(**best_params)
-
-    gbt_model = final_gbt.fit(train_features)  # Train on ALL data
     gbt_predictions = gbt_model.transform(test_features)
 
     lr_evaluator = RegressionEvaluator(
         labelCol="temperature", predictionCol="prediction", metricName="rmse"
     )
 
-    print("Training Random Forest...")
+    print("Training Random Forest with 3-phase hyperparameter tuning")
 
     # Random Forest
     rf = RandomForestRegressor(
         featuresCol="features",
         labelCol="temperature",
-        numTrees=10,
+        numTrees=100,
         minInstancesPerNode=10,
     )
 
-    # Cross-validation grid
     rf_param_grid = (
         ParamGridBuilder()
         .addGrid(rf.numTrees, [50, 100])
@@ -184,39 +257,17 @@ def train_models(train_df, test_df, output_path, spark):
         .build()
     )
 
-    rf_tvs = TrainValidationSplit(
+    # Use 3-phase tuning
+    print("Starting 3-phase hyperparameter tuning for RF...")
+    rf_model = three_phase_tuning(
         estimator=rf,
-        estimatorParamMaps=rf_param_grid,
-        evaluator=lr_evaluator,
-        trainRatio=0.8,  # 80% of data for training, 20% for validation
+        param_grid=rf_param_grid,
+        train_features=train_features,
+        train_ratio=0.8,
+        top_n=5,  # Keep top 5 candidates from Phase 1
         parallelism=8,
     )
 
-    # CV on sample for hyperparameter tuning
-    print("Running CV (this may take a few minutes)...")
-    rf_model_cv = rf_tvs.fit(sample_train_features)
-
-    # Extract best hyperparameters
-    param_map = rf_model_cv.bestModel.extractParamMap()
-
-    # Define subset of hyperparameters you care about
-    subset_params = ["numTrees", "maxDepth", "minInstancesPerNode"]
-
-    # Convert to plain Python dict
-    best_params = {p.name: param_map[p] for p in param_map if p.name in subset_params}
-
-    print(f"Best RF hyperparameters: {best_params}")
-
-    # Refit on full training data with best hyperparameters
-    print("Refitting Random Forest on full training data with best hyperparameters...")
-    final_rf = RandomForestRegressor(
-        featuresCol="features",
-        labelCol="temperature",
-    )
-    # Apply best hyperparameters
-    final_rf = final_rf.setParams(**best_params)
-
-    rf_model = final_rf.fit(train_features)  # Train on ALL data
     rf_predictions = rf_model.transform(test_features)
 
     # Save to output path in a folder with the current date and time

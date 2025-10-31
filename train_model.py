@@ -18,7 +18,6 @@ def create_spark_session():
         SparkSession.builder.appName("WeatherML")
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
-        .config("spark.ui.showConsoleProgress", "true")
         .getOrCreate()
     )
 
