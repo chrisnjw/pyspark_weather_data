@@ -21,6 +21,7 @@ This project trains machine learning models on weather data using PySpark on Goo
    - Submits the ML training job (`train_model.py`)
    - Waits for job completion
    - Outputs saved to `gs://BUCKET_NAME/results/`
+   - Console logs from the script are saved locally to `output.txt`.
 
 ## Configuration
 
@@ -33,3 +34,29 @@ Edit `run_project.sh` to customize:
 - Spark executor settings (lines 23-25)
 
 The cluster auto-deletes after 5 minutes of idle time.
+
+## Output Directory Structure
+
+The project saves all trained models and evaluation results to a structured directory (which is then saved to `gs://BUCKET_NAME/results/` by the run script).
+
+In the `saved_models` folder, the structure is as follows:
+```
+saved_models/
+├── metrics/
+│   └── (Contains evaluation metrics, e.g., RMSE, R2, MAE as CSV or text files)
+├── tuned/
+│   │   
+│   ├── feature_pipeline/
+│   │   └── (The saved PySpark ML Pipeline for preprocessing data)
+│   ├── gradient_boosting/
+│   │   └── (The final, hyperparameter-tuned GBT model)
+│   └── random_forest/
+│       └── (The final, hyperparameter-tuned Random Forest model)
+│
+└── untuned/
+    │
+    ├── gbt_model_untuned/
+    │   └── (The GBT model trained with default parameters)
+    └── rf_model_untuned/
+        └── (The Random Forest model trained with default parameters)
+```
