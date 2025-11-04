@@ -16,6 +16,9 @@ __pycache__/
 # Exclude specific notebook
 data_preprocessing.ipynb 
 
-# Saved model artifacts  
-gbt_model_v1/
-rf_model_v1/
+# Saved model artifacts
+saved_models/
+
+# ... (all your other rules) ...
+results
+20251030_200518.tar.gz
